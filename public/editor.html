@@ -41,6 +41,23 @@
       <div id="publishResult" style="margin-top:10px"></div>
     </div>
 
+    <div class="card">
+      <h2>导入 JSON 采访整理包（整包追加到草稿）</h2>
+      <p class="muted">
+        上传一份采访整理包：<b>批次标识</b>、以包内唯一键标记的<b>事件</b>、每事件多条含年 / 月 / 日精度及出处的<b>时间主张</b>，
+        以及按键引用事件的<b>「先于」关系</b>。先<b>只读预览</b>待写入内容与数量；键重复、关系引用缺失、日期或出处非法时会列出问题并<b>整包拒绝</b>。
+        确认时提交原包、预览返回的<b>内容指纹</b>与<b>草稿修订号</b>；内容被替换、草稿已变化或批次标识曾成功导入都会冲突且不写入。
+      </p>
+      <div class="row">
+        <div class="field" style="max-width:420px">
+          <label>采访整理包（.json 文件）</label>
+          <input type="file" id="importFile" accept="application/json,.json" style="width:auto" />
+        </div>
+        <button class="secondary" id="btnImportPreview" type="button">只读预览待写入内容</button>
+      </div>
+      <div id="importResult" style="margin-top:10px"></div>
+    </div>
+
     <div class="grid2">
       <section>
         <div class="card">
@@ -99,6 +116,16 @@
     <div class="d-foot">
       <button class="secondary" id="restoreCancel" type="button">取消</button>
       <button id="restoreConfirm" type="button">确认：用该版替换当前草稿</button>
+    </div>
+  </dialog>
+
+  <!-- 导入采访整理包对话框 -->
+  <dialog id="importDialog" style="max-width:760px">
+    <div class="d-head" style="background:var(--ok-bg);color:var(--ok);border-color:#bcd8c2">⤵ 预览采访整理包（只读，尚未写入）</div>
+    <div class="d-body" id="importBody">加载预览中…</div>
+    <div class="d-foot">
+      <button class="secondary" id="importCancel" type="button">取消</button>
+      <button id="importConfirm" type="button">确认：整包追加到草稿</button>
     </div>
   </dialog>
 

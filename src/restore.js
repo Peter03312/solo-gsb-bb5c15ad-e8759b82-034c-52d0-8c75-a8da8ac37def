@@ -220,4 +220,5 @@ module.exports = {
   buildRestorePreview,
   restoreDraftFromVersion,
   draftRevisionNo,
+  currentDraftSnapshot,
 };

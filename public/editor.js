@@ -32,6 +32,8 @@ let state = { events: [], relations: [], currentVersionNo: 0, draftRevisionNo: 0
 let baseVersionNo = 0; // 发起修改时所基于的版本号
 let conflictData = null;
 let restorePreview = null; // 恢复草稿预览（确认时提交其中的修订号/最新版本号）
+let importPreview = null; // 采访整理包预览（确认时回传原包/指纹/修订号）
+let importPkg = null; // 预览的原包（确认时原样回传）
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -440,6 +442,162 @@ async function confirmRestore() {
   }
 }
 
+// ---------- 导入 JSON 采访整理包（预览 → 确认，整包追加） ----------
+function readImportFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { resolve(JSON.parse(String(reader.result))); }
+      catch (e) { reject(new Error('文件不是合法 JSON：' + e.message)); }
+    };
+    reader.onerror = () => reject(new Error('读取文件失败'));
+    reader.readAsText(file);
+  });
+}
+
+async function doImportPreview() {
+  const file = $('#importFile').files[0];
+  if (!file) { showImportResult('error', '请先选择采访整理包 .json 文件。'); return; }
+  let pkg;
+  try {
+    pkg = await readImportFile(file);
+  } catch (err) {
+    showImportResult('error', esc(err.message));
+    return;
+  }
+  importPkg = pkg;
+  importPreview = null;
+  $('#importBody').innerHTML = '正在只读校验整包…（不写入任何内容）';
+  $('#importConfirm').disabled = false;
+  $('#importDialog').showModal();
+  try {
+    const data = await api('POST', '/api/editor/import-preview', pkg);
+    importPreview = data;
+    renderImportPreview(data);
+  } catch (err) {
+    if (err.message === 'unauthorized') { $('#importDialog').close(); return; }
+    if (err.status === 422 && err.body?.errors) {
+      $('#importBody').innerHTML = renderImportErrors(err.body);
+    } else {
+      $('#importBody').innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+    }
+    $('#importConfirm').disabled = true;
+  }
+}
+
+function showImportResult(kind, html) {
+  $('#importResult').innerHTML = `<div class="alert ${kind}">${html}</div>`;
+}
+
+function renderImportErrors(body) {
+  const typeName = {
+    invalid_package: '包结构非法',
+    invalid_batch: '批次标识非法',
+    duplicate_key: '事件键重复',
+    invalid_event: '事件非法',
+    missing_claims: '缺少主张',
+    invalid_claim: '主张非法（日期或出处）',
+    relation_reference: '关系引用缺失',
+    self_relation: '事件先于自身',
+    invalid_relation: '关系非法',
+  };
+  const items = body.errors.map((er) => `
+    <li><b>[${esc(typeName[er.type] || er.type)}]</b> ${esc(er.message)}
+      ${er.path ? `<span class="muted">（${esc(er.path)}）</span>` : ''}
+    </li>`).join('');
+  return `
+    <div class="alert error"><b>整包拒绝，未写入任何内容。</b>请修正下列 ${body.errors.length} 个问题后重新选择文件预览：</div>
+    <ul class="error-list">${items}</ul>`;
+}
+
+function importEventHtml(ev) {
+  return `
+    <div class="rel-line">
+      <strong>${esc(ev.title)}</strong>
+      <span class="badge">键 ${esc(ev.key)}</span>
+      <span class="badge">主张 ${ev.claims.length} 条</span>
+      ${ev.description ? `<div class="muted">${esc(ev.description)}</div>` : ''}
+      ${ev.claims.map((c) => `
+        <div class="source" style="margin:4px 0 0 12px">
+          <b>${esc(c.dateLabel)}</b>
+          <span class="badge prec">${esc(PREC_LABEL[c.precision] || c.precision)}</span>
+          <span class="badge">${c.intervalStart} ~ ${c.intervalEnd}</span>
+          <div><b>出处：</b>${esc(c.source)}</div>
+          ${c.note ? `<div class="muted">${esc(c.note)}</div>` : ''}
+        </div>`).join('')}
+    </div>`;
+}
+
+function importRelationsHtml(relations, events) {
+  if (!relations.length) return '<p class="muted">（无先后关系）</p>';
+  const titleByKey = new Map(events.map((e) => [e.key, e.title]));
+  return relations.map((r) => `
+    <div class="rel-line">
+      <strong>${esc(titleByKey.get(r.earlierKey) || r.earlierKey)}</strong>
+      <span class="badge">先于</span>
+      <strong>${esc(titleByKey.get(r.laterKey) || r.laterKey)}</strong>
+      ${r.source ? `<div class="source"><b>出处：</b>${esc(r.source)}</div>` : ''}
+    </div>`).join('');
+}
+
+function renderImportPreview(data) {
+  $('#importBody').innerHTML = `
+    ${data.alreadyImported ? `
+      <div class="alert warn">
+        <b>批次标识「${esc(data.batchId)}」此前已成功导入过。</b>
+        ${data.previousImport ? `<span class="muted">导入时间 ${esc(data.previousImport.importedAt)}（草稿修订号 ${data.previousImport.baseRevision} → ${data.previousImport.revision}）。</span>` : ''}
+        确认将收到冲突且不会重复写入；如需再次导入请先更换批次标识。
+      </div>` : ''}
+    <p>将向<b>当前草稿追加</b>（不替换、不影响已有草稿 / 历史快照 / 访客年表）：
+      批次 <b>${esc(data.batchId)}</b>，共 <b>${data.counts.eventCount}</b> 个事件、
+      <b>${data.counts.claimCount}</b> 条时间主张、<b>${data.counts.relationCount}</b> 条先于关系。
+    </p>
+    <h3 style="font-size:13px">事件与时间主张</h3>
+    ${data.events.map(importEventHtml).join('')}
+    <h3 style="font-size:13px;margin-top:10px">「先于」关系</h3>
+    ${importRelationsHtml(data.relations, data.events)}
+    <p class="muted" style="margin-top:10px">
+      内容指纹 <code style="font-size:11px">${esc(data.fingerprint)}</code><br>
+      确认基准：草稿修订号 ${data.draftRevisionNo} · 最新版本号 ${data.currentVersionNo}。<br>
+      确认后新内容仍是草稿，<b>须按现有流程为每个事件选定主张并通过先后校验后才会发布</b>；
+      若确认前内容被替换或草稿被修改，将报冲突且不写入。
+    </p>
+    <div id="importMsg"></div>`;
+}
+
+async function confirmImport() {
+  if (!importPreview || !importPkg) return;
+  const btn = $('#importConfirm');
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/editor/import-confirm', {
+      package: importPkg,
+      fingerprint: importPreview.fingerprint,
+      draftRevisionNo: importPreview.draftRevisionNo,
+    });
+    $('#importDialog').close();
+    await loadState();
+    showImportResult('ok', `
+      批次 <b>${esc(data.batchId)}</b> 已整包追加（新草稿修订号 ${data.revisionNo}）：
+      ${data.counts.eventCount} 个事件、${data.counts.claimCount} 条主张、${data.counts.relationCount} 条关系。
+      历史快照与访客年表未变。请到事件列表中<b>为新事件选定主张</b>，再「校验能否发布」。`);
+    $('#importFile').value = '';
+  } catch (err) {
+    if (err.message === 'unauthorized') { $('#importDialog').close(); return; }
+    if (err.status === 409) {
+      $('#importMsg').innerHTML = `<div class="alert error">${esc(err.message)}<br>
+        <span class="muted">数据未做任何改动。请关闭本框后重新选择文件预览。</span></div>`;
+      btn.disabled = true;
+    } else if (err.status === 422 && err.body?.errors) {
+      $('#importBody').innerHTML = renderImportErrors(err.body);
+      btn.disabled = true;
+    } else {
+      $('#importMsg').innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  }
+}
+
 // ---------- 事件委托：增删改 ----------
 async function onClick(e) {
   const t = e.target;
@@ -466,6 +624,10 @@ async function onClick(e) {
   if (t.id === 'restoreConfirm') return confirmRestore();
   const restoreVersion = t.dataset && t.dataset.restoreVersion;
   if (restoreVersion !== undefined) return openRestorePreview(Number(restoreVersion));
+
+  if (t.id === 'btnImportPreview') return doImportPreview();
+  if (t.id === 'importCancel') { $('#importDialog').close(); importPreview = null; importPkg = null; return; }
+  if (t.id === 'importConfirm') return confirmImport();
 
   const addEvent = t.dataset && t.dataset.addEvent !== undefined;
   if (t.id === 'btnAddEvent') {

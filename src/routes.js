@@ -5,6 +5,7 @@ const { getDb } = require('./db');
 const { parseClaimDate, claimInterval, formatClaimDate } = require('./dates');
 const { evaluateDraft, publishVersion, latestVersionNo, getVersionDetail, getVersionSummary } = require('./publish');
 const { buildRestorePreview, restoreDraftFromVersion, draftRevisionNo } = require('./restore');
+const { buildImportPreview, confirmImport } = require('./import');
 
 const router = express.Router();
 
@@ -325,6 +326,38 @@ router.post('/api/editor/restore', (req, res) => {
   }
   const result = restoreDraftFromVersion({ versionNo, expectedRevision, expectedLatestVersionNo });
   res.status(200).json({ ok: true, ...result });
+});
+
+// ---- 导入 JSON 采访整理包（第一步）：只读预览，整包校验 + 内容指纹 + 数量清点 ----
+// 请求体即采访整理包本身：{ batchId, events:[{key,title,description?,claims:[...]}], relations:[{earlierKey,laterKey,...}] }
+// 包有任何问题（键重复 / 关系引用缺失 / 日期或出处非法等）返回 422 并列出问题，不写数据。
+router.post('/api/editor/import-preview', (req, res) => {
+  const preview = buildImportPreview(req.body);
+  res.json({ ok: true, ...preview });
+});
+
+// ---- 导入 JSON 采访整理包（第二步）：确认后在一个事务内整包追加到草稿 ----
+// body: { package:<预览时的原包>, fingerprint:<预览返回指纹>, draftRevisionNo:<预览返回修订号> }
+// 409：PACKAGE_FINGERPRINT_MISMATCH（内容被替换）/ DRAFT_REVISION_CONFLICT（草稿已变化）
+//       / BATCH_ALREADY_IMPORTED（批次标识曾成功导入）；参数缺/类型不对 400；包非法 422。
+router.post('/api/editor/import-confirm', (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw badRequest('请求体必须是 JSON 对象 { package, fingerprint, draftRevisionNo }');
+  }
+  const fingerprint = body.fingerprint;
+  if (typeof fingerprint !== 'string' || fingerprint.trim() === '') {
+    throw badRequest('fingerprint 必须是非空字符串（取预览返回的内容指纹）');
+  }
+  const expectedRevision = Number(body.draftRevisionNo);
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw badRequest('draftRevisionNo 必须是非负整数（取预览返回的草稿修订号）');
+  }
+  if (body.package === null || typeof body.package !== 'object') {
+    throw badRequest('package 必须是采访整理包对象（预览时的原包，原样回传）');
+  }
+  const result = confirmImport({ pkg: body.package, fingerprint: fingerprint.trim(), expectedRevision });
+  res.status(201).json({ ok: true, ...result });
 });
 
 module.exports = router;

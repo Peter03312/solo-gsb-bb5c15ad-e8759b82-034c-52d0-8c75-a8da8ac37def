@@ -106,6 +106,95 @@ PORT=8080 EDITOR_TOKEN=my-secret npm start
 - 草稿仅含该版内容，仍需「校验能否发布」后正式发布才会公开；
 - 发布仍遵守现有编辑口令、求解校验与 `baseVersionNo` 冲突约定——恢复的是更旧的版本时，请以**当前最新版本号**为 `baseVersionNo` 发布，否则同样收到 409。
 
+### 上传 JSON 采访整理包（预览 → 确认，整包追加）
+
+编辑台「发布」卡片下方新增**「导入 JSON 采访整理包」**卡片，供把一批访谈整理结果一次性写入草稿。上传一份 JSON 文件后先**只读预览**，确认后才写入。导入是**追加**：已有草稿内容原样保留，整包作为一个事务追加其后；历史快照与访客视图不受影响，新内容仍是草稿，发布照旧要逐事件选定主张并通过先后校验。
+
+包格式（UTF-8 JSON）：
+
+```json
+{
+  "batchId": "interview-2026-09",
+  "events": [
+    {
+      "key": "shuiqu",
+      "title": "修水渠动员会",
+      "description": "可选：事件描述",
+      "claims": [
+        { "precision": "day",   "year": 1958, "month": 9, "day": 12, "source": "李宝山口述，2021-07-05 访谈，录音 03 段", "note": "可选：考异备注" },
+        { "precision": "year",  "year": 1958, "source": "《县水利志》1994 年版，第 87 页" }
+      ]
+    },
+    {
+      "key": "tongshui",
+      "title": "东干渠通水",
+      "claims": [
+        { "precision": "month", "year": 1959, "month": 5, "source": "王秀兰口述，2021-08-02 访谈" }
+      ]
+    }
+  ],
+  "relations": [
+    { "earlierKey": "shuiqu", "laterKey": "tongshui", "source": "二人口述一致（可选）", "note": "" }
+  ]
+}
+```
+
+字段规则：
+
+- `batchId`：批次标识，非空字符串。**同一标识一旦成功导入便永久不能再导第二次**（即使之后删光或恢复草稿；台账独立持久）。
+- `events[].key`：包内唯一键，非空字符串、包内不得重复；关系只按键引用事件。
+- `claims[]`：每事件**至少一条**；`precision` 为 `year` / `month` / `day`，月精度须带 1–12 的 `month`，日精度须带合法的 `month`+`day`（含闰年校验）；`source` 出处必填，`note` 可选。区间与展示标签由服务端按现有规则计算。
+- `relations[]`：`earlierKey` / `laterKey` 必须都能在本包事件键中找到（引用缺失整包拒绝）；一个事件不能先于自身（自环整包拒绝）。允许同一对事件重复声明、也允许关系成环——成环内容可以进草稿，但会在发布校验时被拦下。
+
+两步流程与冲突保护：
+
+1. **预览（只读）**：服务端整包校验、清点待写入数量（事件 / 主张 / 关系数）、计算**内容指纹**（规范化 JSON 的 SHA-256，与空白和键书写顺序无关），并返回当前**草稿修订号**。键重复、关系引用缺失、日期或出处非法等问题会**全部列出**并**整包拒绝（422）**，不写任何数据。若该批次此前已导入，预览会标出 `alreadyImported`。
+2. **确认**：请求必须回提交**原包**、预览返回的**内容指纹**与**草稿修订号**。成功后在一个事务内追加整包，返回包内键 → 草稿 id 的映射、完整 id 对照与新草稿修订号（整包追加只推进一次修订号）。
+3. **冲突（均 409、不写入任何内容）**：
+   - `PACKAGE_FINGERPRINT_MISMATCH`：确认时提交的包与预览的不是同一份内容（被替换 / 改动）；
+   - `DRAFT_REVISION_CONFLICT`：预览后草稿被任何人增删改过（修订号变化）；
+   - `BATCH_ALREADY_IMPORTED`：该批次标识曾成功导入。
+   参数缺失或类型不对返回 400。
+
+命令行调用示例（口令取自 `EDITOR_TOKEN`）：
+
+```bash
+# 第一步：只读预览（请求体即整包）
+curl -sS -X POST http://localhost:3000/api/editor/import-preview \
+  -H 'X-Editor-Token: change-me-please' -H 'Content-Type: application/json' \
+  --data-binary @interview-2026-09.json
+# -> { ok:true, batchId, counts:{eventCount,claimCount,relationCount},
+#      fingerprint:"sha256:…", draftRevisionNo:0, currentVersionNo:0,
+#      events:[…服务端算好的区间与标签…], relations:[…], alreadyImported:false }
+
+# 第二步：确认（原样回传 package、预览的 fingerprint 与 draftRevisionNo）
+curl -sS -X POST http://localhost:3000/api/editor/import-confirm \
+  -H 'X-Editor-Token: change-me-please' -H 'Content-Type: application/json' \
+  -d '{
+        "package": <预览时的原包对象，原样回传>,
+        "fingerprint": "sha256:…",
+        "draftRevisionNo": 0
+      }'
+# -> 201 { ok:true, batchId, revisionNo:1, currentVersionNo, counts,
+#          keys:{shuiqu:1,tongshui:2}, idMap:{events:[…],relations:[…]}, draft:{…} }
+```
+
+用 shell 一步串起「预览 → 确认」（自动回填指纹与修订号，原包原样回传）：
+
+```bash
+TOKEN='change-me-please'; BASE='http://localhost:3000'
+PV=$(curl -sS -X POST "$BASE/api/editor/import-preview" \
+       -H "X-Editor-Token: $TOKEN" -H 'Content-Type: application/json' \
+       --data-binary @interview-2026-09.json)
+printf '%s' "$PV" | jq '{package: input, fingerprint: .fingerprint, draftRevisionNo: .draftRevisionNo}' \
+       interview-2026-09.json > /tmp/import-confirm.json
+curl -sS -X POST "$BASE/api/editor/import-confirm" \
+  -H "X-Editor-Token: $TOKEN" -H 'Content-Type: application/json' \
+  --data-binary @/tmp/import-confirm.json
+```
+
+导入后：到事件列表中为每个**新事件选定一条主张**（导入不会替你选），再用既有的「校验能否发布 / 发布新版本」流程，按当前 `baseVersionNo` 发布；选择缺失、关系成环、时间无解仍按现有规则拒绝发布。
+
 ### 两名编辑者并发修改（版本冲突）
 
 发布请求必须带 `baseVersionNo`（编辑台打开时自动记录当前最新版本号）。若两名编辑者都从第 N 版开始改，第一人发布产生第 N+1 版后，第二人仍以 `baseVersionNo=N` 提交时：
@@ -123,6 +212,7 @@ PORT=8080 EDITOR_TOKEN=my-secret npm start
 - 单文件 SQLite 数据库：容器中位于 `/app/data/chronicle.db`（Docker 卷 `chronicle-data`），本机直跑位于 `./data/chronicle.db`。
 - 备份：停止写入后复制该 `.db` 文件即可（或使用 SQLite 的 `.backup` 命令）。
 - 历史版本表 `versions / version_events / version_relations` 只追加、不更新不删除，保证不可变。
+- 导入台账表 `imported_batches` 同样只追加，按 `batch_id` 唯一永久去重；它不随草稿清空 / 恢复而重置。
 
 ## 目录结构
 
@@ -135,6 +225,7 @@ src/
   solver.js     Tarjan 环检测 + 拓扑下界传播求严格先后可行解
   publish.js    发布事务：再校验 + 版本冲突检查 + 写不可变快照
   restore.js    恢复草稿：只读预览 + 原子替换事务（修订号/版本号冲突检查、按快照重建）
+  import.js     采访整理包导入：整包校验 + 内容指纹 + 只读预览 + 事务追加（批次台账永久去重）
   seed.js       演示数据
 public/         访客页与编辑台（原生 HTML/CSS/JS）
 test/           node:test 单元与端到端测试（含成环、无解、409 冲突、草稿恢复）
@@ -161,3 +252,9 @@ test/           node:test 单元与端到端测试（含成环、无解、409 �
 - `POST /api/editor/restore` — 确认恢复；体含 `versionNo`、`draftRevisionNo`、`currentVersionNo`（后两者取预览返回值）
   - 200：`{restoredFromVersionNo, currentVersionNo, revisionNo, idMap:{events,relations}, pendingSelection:[{eventId,claimId}], draft}`
   - 409：`{code:"DRAFT_REVISION_CONFLICT"|"VERSION_CONFLICT", ...}`（草稿或最新版本在确认前变化，数据不变）；版本不存在 404；参数非法 400
+- `POST /api/editor/import-preview` — 上传 JSON 采访整理包的**只读预览**（请求体即整包 `{batchId,events:[{key,title,description?,claims:[...]}],relations:[{earlierKey,laterKey,...}]}`）
+  - 200：`{ok,batchId,fingerprint,draftRevisionNo,currentVersionNo,counts:{eventCount,claimCount,relationCount},events,relations,alreadyImported,previousImport}`
+  - 422：`{message,errors:[{type,message,path?,key?,field?,missingKeys?}]}`（键重复 / 关系引用缺失 / 日期或出处非法等，全部列出并整包拒绝，不写数据）
+- `POST /api/editor/import-confirm` — 确认导入；体含 `package`（预览的原包原样回传）、`fingerprint`、`draftRevisionNo`（后两者取预览返回值）
+  - 201：`{ok,batchId,revisionNo,currentVersionNo,counts,idMap:{events:[{key,eventId,claims:[{index,claimId}]}],relations:[{index,relationId,earlierKey,earlierEventId,laterKey,laterEventId}]},keys:{<包内键>:<草稿事件id>},draft}`
+  - 409：`{code:"PACKAGE_FINGERPRINT_MISMATCH"|"DRAFT_REVISION_CONFLICT"|"BATCH_ALREADY_IMPORTED", ...}`（内容被替换 / 草稿已变化 / 批次曾导入，均不写入）；包非法 422；参数非法 400
