@@ -41,6 +41,27 @@
       <div id="publishResult" style="margin-top:10px"></div>
     </div>
 
+    <div class="card">
+      <h2>导入采访整理包（JSON）</h2>
+      <p class="muted">
+        上传或粘贴整理包：含批次标识 <code>batchId</code>、以包内唯一键 <code>key</code> 标记的事件
+        （每事件多条含出处的时间主张），以及按键引用事件的「先于」关系。
+        先<b>只读预览</b>待写入内容与数量；键重复、关系引用缺失、日期或出处非法会列出全部问题并整包拒绝。
+        确认须提交原包、预览返回的内容指纹与草稿修订号；内容被替换、草稿已变化或批次曾成功导入都会冲突且不写入。
+        导入只<b>追加</b>到草稿区（既有草稿、历史快照与访客年表不受影响），仍需选定主张、校验后发布才会公开。
+      </p>
+      <div class="row">
+        <div class="field" style="max-width:280px">
+          <label>选择 JSON 文件</label>
+          <input type="file" id="bundleFile" accept=".json,application/json" />
+        </div>
+      </div>
+      <label style="margin-top:8px">或直接粘贴整理包 JSON</label>
+      <textarea id="bundleText" rows="5" placeholder='{"batchId":"2026-09-fangtan-01","events":[{"key":"a","title":"…","claims":[{"precision":"year","year":1958,"source":"…"}]}],"relations":[]}'></textarea>
+      <div style="margin-top:8px"><button id="btnBundlePreview" type="button" class="secondary">预览导入内容（只读）</button></div>
+      <div id="bundleMsg" style="margin-top:10px"></div>
+    </div>
+
     <div class="grid2">
       <section>
         <div class="card">
@@ -99,6 +120,16 @@
     <div class="d-foot">
       <button class="secondary" id="restoreCancel" type="button">取消</button>
       <button id="restoreConfirm" type="button">确认：用该版替换当前草稿</button>
+    </div>
+  </dialog>
+
+  <!-- 导入采访整理包对话框 -->
+  <dialog id="bundleDialog">
+    <div class="d-head" style="background:var(--ok-bg);color:var(--ok);border-color:#bcd8c2">⇪ 预览导入采访整理包</div>
+    <div class="d-body" id="bundleBody">加载预览中…</div>
+    <div class="d-foot">
+      <button class="secondary" id="bundleCancel" type="button">取消</button>
+      <button id="bundleConfirm" type="button">确认导入整包</button>
     </div>
   </dialog>
 

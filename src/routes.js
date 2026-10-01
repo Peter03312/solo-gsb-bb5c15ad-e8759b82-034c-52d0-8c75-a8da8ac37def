@@ -5,6 +5,7 @@ const { getDb } = require('./db');
 const { parseClaimDate, claimInterval, formatClaimDate } = require('./dates');
 const { evaluateDraft, publishVersion, latestVersionNo, getVersionDetail, getVersionSummary } = require('./publish');
 const { buildRestorePreview, restoreDraftFromVersion, draftRevisionNo } = require('./restore');
+const { buildImportPreview, confirmImport } = require('./bundle');
 
 const router = express.Router();
 
@@ -325,6 +326,33 @@ router.post('/api/editor/restore', (req, res) => {
   }
   const result = restoreDraftFromVersion({ versionNo, expectedRevision, expectedLatestVersionNo });
   res.status(200).json({ ok: true, ...result });
+});
+
+// ---- 导入采访整理包：只读预览，不改数据 ----
+// 请求体即整理包 JSON。校验问题（键重复 / 引用缺失 / 日期或出处非法等）一次性列出，
+// 有任何问题即 422 整包拒绝；通过时返回待写入内容、数量、内容指纹与草稿修订号。
+router.post('/api/editor/import-preview', (req, res) => {
+  const preview = buildImportPreview(req.body);
+  res.json({ ok: true, ...preview });
+});
+
+// ---- 确认导入：一个事务追加整包 ----
+// 必须提交原包 bundle、预览返回的内容指纹 fingerprint 与草稿修订号 draftRevisionNo。
+router.post('/api/editor/import', (req, res) => {
+  const body = req.body || {};
+  if (!body.bundle || typeof body.bundle !== 'object' || Array.isArray(body.bundle)) {
+    throw badRequest('bundle 必须是整理包对象（与预览时提交的完全一致）');
+  }
+  const fingerprint = body.fingerprint;
+  if (typeof fingerprint !== 'string' || fingerprint.trim() === '') {
+    throw badRequest('fingerprint 必须是预览返回的内容指纹字符串');
+  }
+  const expectedRevision = Number(body.draftRevisionNo);
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw badRequest('draftRevisionNo 必须是非负整数（取预览时返回的值）');
+  }
+  const result = confirmImport({ bundle: body.bundle, fingerprint: fingerprint.trim(), expectedRevision });
+  res.status(201).json({ ok: true, ...result });
 });
 
 module.exports = router;

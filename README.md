@@ -106,6 +106,75 @@ PORT=8080 EDITOR_TOKEN=my-secret npm start
 - 草稿仅含该版内容，仍需「校验能否发布」后正式发布才会公开；
 - 发布仍遵守现有编辑口令、求解校验与 `baseVersionNo` 冲突约定——恢复的是更旧的版本时，请以**当前最新版本号**为 `baseVersionNo` 发布，否则同样收到 409。
 
+### 导入采访整理包（JSON，预览 → 确认）
+
+编辑者可在工作台「导入采访整理包」卡片中上传 `.json` 文件或粘贴 JSON，也可直接调用 HTTP API。整理包格式（完整示例见 `examples/interview-bundle.example.json`）：
+
+```json
+{
+  "batchId": "2026-09-dongganqu-fangtan-01",
+  "events": [
+    {
+      "key": "dongyuan-hui",
+      "title": "修水渠动员会",
+      "description": "可选",
+      "claims": [
+        { "precision": "day", "year": 1958, "month": 9, "day": 12, "source": "李宝山口述，2021-07-05 访谈", "note": "可选考异" },
+        { "precision": "year", "year": 1958, "source": "《县水利志》1994 年版，第 87 页" }
+      ]
+    },
+    {
+      "key": "tongshui",
+      "title": "东干渠通水",
+      "claims": [ { "precision": "month", "year": 1959, "month": 5, "source": "王秀兰口述" } ]
+    }
+  ],
+  "relations": [
+    { "earlierKey": "dongyuan-hui", "laterKey": "tongshui", "source": "二人口述一致" }
+  ]
+}
+```
+
+- `batchId`：批次标识，**已成功导入过的批次不能再次导入**；
+- 每个事件以包内唯一键 `key` 标记，至少一条时间主张；主张字段与手工录入一致（`precision` 为 `year`/`month`/`day`，`source` 出处必填）；
+- `relations` 可省略，用 `earlierKey`/`laterKey` 按键引用事件，表示「先于」。
+
+流程与恢复草稿类似，分两步：
+
+1. **预览（只读）**：`POST /api/editor/import-preview`，请求体即整理包 JSON。返回待写入的事件 / 主张 / 关系内容与数量、`fingerprint`（内容指纹）、`draftRevisionNo`（当前草稿修订号），不写任何数据。**键重复、关系引用缺失（指向包内不存在的键）、日期或出处非法**等问题会一次性全部列出，并以 **422** 整包拒绝：
+
+   ```bash
+   curl -s -X POST http://localhost:3000/api/editor/import-preview \
+     -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+     --data-binary @examples/interview-bundle.example.json
+   # => {"ok":true,"batchId":"...","fingerprint":"cbf008...","draftRevisionNo":0,
+   #     "alreadyImported":null,"counts":{"eventCount":2,"claimCount":3,"relationCount":1},
+   #     "events":[...],"relations":[...]}
+   ```
+
+2. **确认导入**：`POST /api/editor/import`，必须提交**原包**、预览返回的**内容指纹**和**草稿修订号**。成功时在**一个事务**中把整包**追加**进草稿区（既有草稿、历史快照、访客视图均不受影响），返回包内键 → 草稿 ID 的映射与新修订号（整包只推进一次修订号）：
+
+   ```bash
+   # 用预览返回的 fingerprint 与 draftRevisionNo 组装确认请求（示例借助 jq）
+   PREVIEW=$(curl -s -X POST http://localhost:3000/api/editor/import-preview \
+     -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+     --data-binary @examples/interview-bundle.example.json)
+   jq -n --argjson p "$PREVIEW" --slurpfile b examples/interview-bundle.example.json \
+     '{bundle: $b[0], fingerprint: $p.fingerprint, draftRevisionNo: $p.draftRevisionNo}' \
+   | curl -s -X POST http://localhost:3000/api/editor/import \
+     -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" --data-binary @-
+   # => 201 {"ok":true,"batchId":"...","revisionNo":1,"counts":{...},
+   #     "idMap":{"events":[{"key":"dongyuan-hui","eventId":1,"claimIds":[1,2]},...],
+   #              "relations":[{"earlierKey":"dongyuan-hui","laterKey":"tongshui","relationId":1}]}}
+   ```
+
+   确认在以下情况返回 **409 且不写入任何数据**（需重新预览后再确认）：
+   - `BUNDLE_CONTENT_MISMATCH`：提交的包与预览指纹不符（内容被替换）；
+   - `DRAFT_REVISION_CONFLICT`：预览后草稿被任何人增删改过；
+   - `BATCH_ALREADY_IMPORTED`：批次标识曾成功导入（失败的确认不留记录，可修正后重试）。
+
+导入的内容只是草稿：仍需在编辑台为每个事件**选定主张**、通过现有「校验能否发布」（含先后关系求解）后正式发布，访客才能看到。
+
 ### 两名编辑者并发修改（版本冲突）
 
 发布请求必须带 `baseVersionNo`（编辑台打开时自动记录当前最新版本号）。若两名编辑者都从第 N 版开始改，第一人发布产生第 N+1 版后，第二人仍以 `baseVersionNo=N` 提交时：
@@ -123,6 +192,7 @@ PORT=8080 EDITOR_TOKEN=my-secret npm start
 - 单文件 SQLite 数据库：容器中位于 `/app/data/chronicle.db`（Docker 卷 `chronicle-data`），本机直跑位于 `./data/chronicle.db`。
 - 备份：停止写入后复制该 `.db` 文件即可（或使用 SQLite 的 `.backup` 命令）。
 - 历史版本表 `versions / version_events / version_relations` 只追加、不更新不删除，保证不可变。
+- 导入批次表 `import_batches` 记录每次成功导入的批次标识与内容指纹，用于防止同一批次重复导入。
 
 ## 目录结构
 
@@ -135,9 +205,11 @@ src/
   solver.js     Tarjan 环检测 + 拓扑下界传播求严格先后可行解
   publish.js    发布事务：再校验 + 版本冲突检查 + 写不可变快照
   restore.js    恢复草稿：只读预览 + 原子替换事务（修订号/版本号冲突检查、按快照重建）
+  bundle.js     采访整理包导入：整包校验 + 内容指纹 + 只读预览 + 事务追加（批次防重/修订号冲突检查）
   seed.js       演示数据
 public/         访客页与编辑台（原生 HTML/CSS/JS）
-test/           node:test 单元与端到端测试（含成环、无解、409 冲突、草稿恢复）
+examples/       采访整理包 JSON 示例
+test/           node:test 单元与端到端测试（含成环、无解、409 冲突、草稿恢复、整理包导入）
 ```
 
 ## 主要 HTTP API
@@ -161,3 +233,8 @@ test/           node:test 单元与端到端测试（含成环、无解、409 �
 - `POST /api/editor/restore` — 确认恢复；体含 `versionNo`、`draftRevisionNo`、`currentVersionNo`（后两者取预览返回值）
   - 200：`{restoredFromVersionNo, currentVersionNo, revisionNo, idMap:{events,relations}, pendingSelection:[{eventId,claimId}], draft}`
   - 409：`{code:"DRAFT_REVISION_CONFLICT"|"VERSION_CONFLICT", ...}`（草稿或最新版本在确认前变化，数据不变）；版本不存在 404；参数非法 400
+- `POST /api/editor/import-preview` — 整理包只读预览；请求体即整理包 JSON，返回 `fingerprint`、`draftRevisionNo`、`counts`、待写入 `events`/`relations` 与 `alreadyImported` 提示
+  - 422：`{code:"BUNDLE_INVALID", problems:[{type, message, ...}]}`（键重复 `duplicate_key`、引用缺失 `missing_reference`、日期非法 `invalid_date`、出处非法 `invalid_source`、自环 `self_relation`、结构非法 `invalid_structure`，整包拒绝）
+- `POST /api/editor/import` — 确认导入；体含 `bundle`（原包）、`fingerprint`、`draftRevisionNo`（后两者取预览返回值）
+  - 201：`{batchId, revisionNo, counts, idMap:{events:[{key,eventId,claimIds}], relations:[{earlierKey,laterKey,relationId}]}}`（一个事务追加整包）
+  - 409：`{code:"BUNDLE_CONTENT_MISMATCH"|"DRAFT_REVISION_CONFLICT"|"BATCH_ALREADY_IMPORTED", ...}`（内容被替换 / 草稿已变化 / 批次已导入，均不写入）；参数非法 400

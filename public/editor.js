@@ -32,6 +32,8 @@ let state = { events: [], relations: [], currentVersionNo: 0, draftRevisionNo: 0
 let baseVersionNo = 0; // 发起修改时所基于的版本号
 let conflictData = null;
 let restorePreview = null; // 恢复草稿预览（确认时提交其中的修订号/最新版本号）
+let bundleParsed = null;   // 解析后的整理包原包（确认时原样提交）
+let bundlePreview = null;  // 导入预览（确认时提交其中的指纹/草稿修订号）
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -440,6 +442,111 @@ async function confirmRestore() {
   }
 }
 
+// ---------- 导入采访整理包（JSON，预览 → 确认） ----------
+function showBundleMsg(kind, html) {
+  $('#bundleMsg').innerHTML = `<div class="alert ${kind}">${html}</div>`;
+}
+
+function bundleProblemsHtml(problems) {
+  return `<ul class="error-list">${problems.map((p) => `<li>${esc(p.message)}</li>`).join('')}</ul>`;
+}
+
+async function previewBundleImport() {
+  const text = $('#bundleText').value.trim();
+  if (!text) { showBundleMsg('error', '请先选择 JSON 文件或粘贴整理包 JSON。'); return; }
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e) {
+    showBundleMsg('error', `JSON 解析失败：${esc(e.message)}`);
+    return;
+  }
+  try {
+    const data = await api('POST', '/api/editor/import-preview', parsed);
+    bundleParsed = parsed;
+    bundlePreview = data;
+    renderBundlePreview(data);
+    $('#bundleConfirm').disabled = Boolean(data.alreadyImported);
+    $('#bundleDialog').showModal();
+  } catch (err) {
+    if (err.message === 'unauthorized') return;
+    if (err.status === 422 && err.body && Array.isArray(err.body.problems)) {
+      showBundleMsg('error', `<b>${esc(err.body.message)}</b>${bundleProblemsHtml(err.body.problems)}`);
+    } else {
+      showBundleMsg('error', esc(err.message));
+    }
+  }
+}
+
+function renderBundlePreview(data) {
+  const evHtml = data.events.map((ev) => `
+    <div class="rel-line">
+      <strong>${esc(ev.title)}</strong> <span class="badge">键 ${esc(ev.key)}</span>
+      ${ev.description ? `<div class="muted">${esc(ev.description)}</div>` : ''}
+      ${ev.claims.map((c) => `<div class="source"><b>${esc(c.dateLabel)}</b>（区间 ${c.intervalStart} ~ ${c.intervalEnd}）<br><b>出处：</b>${esc(c.source)}${c.note ? `<br><span class="muted">${esc(c.note)}</span>` : ''}</div>`).join('')}
+    </div>`).join('');
+  const relHtml = data.relations.length
+    ? data.relations.map((r) => `
+        <div class="rel-line">
+          <strong>${esc(r.earlierTitle)}</strong> <span class="badge">先于</span> <strong>${esc(r.laterTitle)}</strong>
+          ${r.source ? `<div class="source"><b>出处：</b>${esc(r.source)}</div>` : ''}
+        </div>`).join('')
+    : '<p class="muted">（无「先于」关系）</p>';
+  $('#bundleBody').innerHTML = `
+    ${data.alreadyImported ? `<div class="alert error">批次标识「${esc(data.batchId)}」已于 ${esc(data.alreadyImported.importedAt)} UTC 成功导入过，确认将返回冲突。请更换批次标识后再预览。</div>` : ''}
+    <p>批次 <b>${esc(data.batchId)}</b> 校验通过，将<b>追加</b>到当前草稿（既有草稿、历史快照与访客年表不受影响）：</p>
+    <p>
+      <span class="badge prec">事件 ${data.counts.eventCount} 个</span>
+      <span class="badge prec">时间主张 ${data.counts.claimCount} 条</span>
+      <span class="badge prec">先于关系 ${data.counts.relationCount} 条</span>
+    </p>
+    <h3 style="font-size:13px">待写入事件与主张</h3>
+    <div style="max-height:220px;overflow:auto">${evHtml}</div>
+    <h3 style="font-size:13px;margin-top:10px">待写入「先于」关系</h3>
+    ${relHtml}
+    <p class="muted" style="margin-top:10px">内容指纹 <code>${esc(data.fingerprint.slice(0, 16))}…</code> · 预览时草稿修订号 ${data.draftRevisionNo}。
+      确认时须提交原包与该指纹；内容被替换、草稿已变化或批次已导入都会冲突且不写入。
+      导入后仍需为事件选定主张并「校验能否发布」。</p>
+    <div id="bundleDialogMsg"></div>`;
+}
+
+async function confirmBundleImport() {
+  if (!bundleParsed || !bundlePreview) return;
+  const btn = $('#bundleConfirm');
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/editor/import', {
+      bundle: bundleParsed,
+      fingerprint: bundlePreview.fingerprint,
+      draftRevisionNo: bundlePreview.draftRevisionNo,
+    });
+    $('#bundleDialog').close();
+    const mapping = data.idMap.events.map((m) => `「${m.key}」→ 事件 #${m.eventId}（主张 ${m.claimIds.length} 条）`).join('、');
+    bundleParsed = null;
+    bundlePreview = null;
+    $('#bundleText').value = '';
+    $('#bundleFile').value = '';
+    await loadState();
+    showBundleMsg('ok', `
+      批次 <b>${esc(data.batchId)}</b> 已导入草稿（新草稿修订号 ${data.revisionNo}）：
+      ${data.counts.eventCount} 个事件、${data.counts.claimCount} 条主张、${data.counts.relationCount} 条关系。<br>
+      <span class="muted">键 → 草稿 ID：${esc(mapping)}。历史快照与访客年表未变；
+      请为导入的事件选定主张并「校验能否发布」后再发布。</span>`);
+  } catch (err) {
+    if (err.message === 'unauthorized') { $('#bundleDialog').close(); return; }
+    const box = $('#bundleDialogMsg');
+    if (err.status === 409) {
+      box.innerHTML = `<div class="alert error">${esc(err.message)}<br>
+        <span class="muted">未写入任何数据。请关闭本框后重新「预览导入内容」。</span></div>`;
+      btn.disabled = true;
+    } else if (err.status === 422 && err.body && Array.isArray(err.body.problems)) {
+      box.innerHTML = `<div class="alert error">${esc(err.body.message)}${bundleProblemsHtml(err.body.problems)}</div>`;
+      btn.disabled = true;
+    } else {
+      box.innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  }
+}
+
 // ---------- 事件委托：增删改 ----------
 async function onClick(e) {
   const t = e.target;
@@ -466,6 +573,10 @@ async function onClick(e) {
   if (t.id === 'restoreConfirm') return confirmRestore();
   const restoreVersion = t.dataset && t.dataset.restoreVersion;
   if (restoreVersion !== undefined) return openRestorePreview(Number(restoreVersion));
+
+  if (t.id === 'btnBundlePreview') return previewBundleImport();
+  if (t.id === 'bundleCancel') { $('#bundleDialog').close(); bundleParsed = null; bundlePreview = null; return; }
+  if (t.id === 'bundleConfirm') return confirmBundleImport();
 
   const addEvent = t.dataset && t.dataset.addEvent !== undefined;
   if (t.id === 'btnAddEvent') {
@@ -568,6 +679,15 @@ document.addEventListener('change', onChange);
 $('#tokenInput').value = store.token;
 $('#editorName').value = store.editor;
 $('#editorName').addEventListener('input', (e) => { store.editor = e.target.value; });
+$('#bundleFile').addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  try {
+    $('#bundleText').value = await f.text();
+  } catch {
+    showBundleMsg('error', '读取文件失败，请重试或直接粘贴 JSON。');
+  }
+});
 
 (async function init() {
   if (!store.token) {
